@@ -1,12 +1,13 @@
 package repos
 
 import io.circe.Json
-import zio.{Task, ZIO}
+import models.AppError.DBError
+import zio.{ IO, ZIO }
 
 trait JsonSchemaRepo {
-  def insert(id: String, schema: Json): Task[Unit]
+  def insert(id: String, schema: Json): IO[DBError, Unit]
 
-  def getById(id: String): Task[Option[Json]]
+  def getById(id: String): IO[DBError, Option[Json]]
 }
 
 object JsonSchemaRepo {

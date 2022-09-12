@@ -2,8 +2,10 @@ package apps
 
 import io.circe.parser._
 import io.circe.syntax._
-import models.{ApiAction, ApiResponse, ApiStatus}
+import models.AppError.{ SchemaNotFoundError, SchemaParsingError }
+import models.{ ApiAction, ApiResponse, ApiStatus, AppError }
 import repos.JsonSchemaRepo
+import validation.JsonSchemaValidation
 import zhttp.http._
 import zio.ZIO
 
@@ -12,45 +14,59 @@ object JsonSchemaApp {
     Http.collectZIO[Request] {
 
       case req @ Method.POST -> !! / "schema" / id =>
-        for {
-          body     <- req.bodyAsString
-          schema   <- ZIO.succeed(parse(body))
-          response <- schema match {
-                        case Left(_) =>
-                          ZIO.succeed(invalidSchemaResponse(id))
-
-                        case Right(schema) =>
-                          JsonSchemaRepo.insert(id, schema).as(validSchemaResponse(id))
-                      }
-        } yield response
+        (for {
+          body   <- req.bodyAsString.orDie
+          schema <- ZIO.fromEither(parse(body)).mapError(_ => SchemaParsingError(id))
+          _      <- JsonSchemaRepo.insert(id, schema)
+        } yield ())
+          .as(validSchemaResponse(id))
+          .catchAll(error => ZIO.succeed(invalidSchemaResponse(id, error)))
 
       case Method.GET -> !! / "schema" / id =>
-        JsonSchemaRepo.getById(id).map {
-          case None => notExisitingSchemaResponse(id)
-          case Some(schema) => Response.json(schema.toString())
-        }
+        JsonSchemaRepo
+          .getById(id)
+          .someOrFail(SchemaNotFoundError(id))
+          .map(shema => Response.json(shema.toString()))
+          .catchAll(error => ZIO.succeed(invalidSchemaResponse(id, error)))
 
       case req @ Method.POST -> !! / "validate" / id =>
-        for {
-          body <- req.bodyAsString
-
-
-        } yield ???
+        (for {
+          schemaJson <- JsonSchemaRepo.getById(id).someOrFail(SchemaNotFoundError(id))
+          body       <- req.bodyAsString.orDie
+          json       <- ZIO.fromEither(parse(body)).mapError(_ => SchemaParsingError(id))
+          schema     <- JsonSchemaValidation.loadSchema(schemaJson)
+          _          <- JsonSchemaValidation.validateJson(schema, json.deepDropNullValues)
+        } yield ())
+          .as(validValidationResponse(id))
+          .catchAll(error => ZIO.succeed(invalidValidationResponse(id, error)))
     }
 
+  def invalidValidationResponse(id: String, error: AppError) =
+    Response
+      .json(
+        ApiResponse(
+          ApiAction.ValidatedDocument,
+          id,
+          ApiStatus.Error,
+          Some(error.toString)
+        ).asJson.dropNullValues.toString
+      )
+      .setStatus(Status.BadRequest)
 
-  def invalidSchemaResponse(id: String) =
+  def validValidationResponse(id: String) =
     Response.json(
-      ApiResponse(ApiAction.UploadedSchema, id, ApiStatus.Error, Some("Invalid JSON")).asJson.toString
-    ).setStatus(Status.BadRequest)
+      ApiResponse(ApiAction.ValidatedDocument, id, ApiStatus.Success, None).asJson.dropNullValues.toString()
+    )
+
+  def invalidSchemaResponse(id: String, error: AppError) =
+    Response
+      .json(
+        ApiResponse(ApiAction.UploadedSchema, id, ApiStatus.Error, Some(error.toString)).asJson.dropNullValues.toString
+      )
+      .setStatus(Status.BadRequest)
 
   def validSchemaResponse(id: String) =
     Response.json(
-      ApiResponse(ApiAction.UploadedSchema, id, ApiStatus.Success, None).asJson.toString()
+      ApiResponse(ApiAction.UploadedSchema, id, ApiStatus.Success, None).asJson.dropNullValues.toString()
     )
-
-  def notExisitingSchemaResponse(id: String) =
-    Response.json(
-      ApiResponse(ApiAction.FetchSchema, id, ApiStatus.Error, Some(s"The schema with id: $id dose not exist")).asJson.toString()
-    ).setStatus(Status.NotFound)
 }
